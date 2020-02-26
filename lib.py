@@ -10,6 +10,7 @@ import zlib
 # CONSTANTS
 ASCII_SPACE = b'\x20'
 NULL_SEP = b'\x00'
+GIT_OBJECTS = {}  # defined here, but filled later
 
 # ALIASES
 
@@ -55,8 +56,9 @@ class GitObj(object):
     )
 
     def __init__(self, repo, data=None):
-        assert isinstance(repo, GitRepository)
-        self.repo = repo
+        if repo:
+            assert isinstance(repo, GitRepository)
+            self.repo = repo
 
         if data:
             self.data = self.deserialize(data)
@@ -92,7 +94,7 @@ class GitObj(object):
 
         Return the files hash
         """
-        # Compute SHA-1 hash sum
+        # Compute SHA-1 hash sumobject_write
         sha = hashlib.sha1(self.header).hexdigest()
 
         if not skip_write:
@@ -102,6 +104,27 @@ class GitObj(object):
                 # Compress and write the header
                 f.write(zlib.compress(self.header))
         return sha
+
+    @staticmethod
+    def hash(fd, fmt, repo=None):
+        """
+        Compute SHA-1 checksum of any file.
+
+        :param fd: a open file descriptor
+        :param fmt: the object type. [commit, blob, tag, tree]
+        :param repo: optional repository instance. If provided the hash is stored inside the gitdir of that repo.
+        :return:
+        """
+        raw = fd.read()
+        if isinstance(fmt, str):
+            fmt = fmt.encode('ascii')
+
+        c = GIT_OBJECTS.get(fmt, None)
+        if not c:
+            raise ValueError(f"{fmt} is not a valid Git Object format.")
+
+        c = c(repo, raw)
+        return c.write(skip_write=not bool(repo))  # if repo is provided, actually write the the hash
 
     def __repr__(self):
         return f"<Basic GitObj>"
@@ -318,16 +341,9 @@ class GitRepository(object):
                 raise Exception(f"Malformed object {sha}: bad length")
 
             # Pick constructor
-            if fmt == b'commit':
-                c = GitCommit
-            elif fmt == b'tree':
-                c = GitTree
-            elif fmt == b'tag':
-                c = GitTag
-            elif fmt == b'blob':
-                c = GitBlob
-            else:
-                raise Exception(f"Unknown Git type {fmt.decode('ascii')} for object {sha}")
+            c = GIT_OBJECTS.get(fmt)  # fmt is already binary
+            if not c:
+                raise ValueError(f"{fmt} is not a valid format!")
 
             # Call constructor and return object
             return c(self, raw[y + 1:])
@@ -344,10 +360,10 @@ class GitRepository(object):
 
         """
         obj = self.object_read(self.object_find(obj_sha, fmt))
-        sys.stdout.buffer.write(obj.serialize())
+        sys.stdout.buffer.write(obj.serialize())  # write binary data which is not possible with print
 
 
-# BRIDGES
+# BRIDGE FUNCTIONS
 def cmd_init(*args):
     return GitRepository.create_repository()
 
@@ -357,12 +373,30 @@ def cmd_cat_file(args):
     repo.cat(args.object, fmt=args.type.encode())
 
 
+def cmd_hash(args):
+    repo = GitRepository.find_repo() if args.write else None
+    with open(args.path, 'rb') as f:
+        sha_sum = GitObj.hash(f, args.type, repo)
+        print(sha_sum)
+
+
+# update already defined var with real data
+GIT_OBJECTS.update({
+    b'commit': GitCommit,
+    b'tree': GitTree,
+    b'tag': GitTag,
+    b'blob': GitBlob,
+
+})
+
+
 def main(*args):
     # Main parser
     parser = argparse.ArgumentParser(description="The stupid content tracker")
     # Sub parsers
     subparsers = parser.add_subparsers(title="commands", dest="command")
 
+    # GIT INIT
     argsp = subparsers.add_parser("init", help="Create/Initialize a new, empty repository.")
     argsp.add_argument("path",
                        metavar="directory",
@@ -370,6 +404,7 @@ def main(*args):
                        default=".",
                        help="Where is the repository located?")
 
+    # GIT CAT: gitpy.py cat-file blob bc0b50cebcdbe79d8b5cc86a138df029a92c54d2
     argsp = subparsers.add_parser("cat-file",
                                   help="Provide content of repository objects")
 
@@ -382,6 +417,26 @@ def main(*args):
                        metavar="object",
                        help="The object to display")
 
+    # GIT HASH: gitpy.py hash [-w] [-t TYPE] FILE
+    argsp = subparsers.add_parser(
+        "hash",
+        help="Compute object ID and optionally creates a blob from a file")
+
+    argsp.add_argument("-t",
+                       metavar="type",
+                       dest="type",
+                       choices=["blob", "commit", "tag", "tree"],
+                       default="blob",
+                       help="Specify the type")
+
+    argsp.add_argument("-w",
+                       dest="write",
+                       action="store_true",
+                       help="Actually write the object into the database")
+
+    argsp.add_argument("path",
+                       help="Read object from <file>")
+
     # PARSE
     parsed_args = parser.parse_args(args)
 
@@ -389,3 +444,5 @@ def main(*args):
         cmd_init(parsed_args)
     elif parsed_args.command == "cat-file":
         cmd_cat_file(parsed_args)
+    elif parsed_args.command == "hash":
+        cmd_hash(parsed_args)
