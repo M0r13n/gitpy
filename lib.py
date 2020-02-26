@@ -7,6 +7,8 @@ import re
 import sys
 import zlib
 
+from key_value import KeyValueStore
+
 # CONSTANTS
 ASCII_SPACE = b'\x20'
 NULL_SEP = b'\x00'
